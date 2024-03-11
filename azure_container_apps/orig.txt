@@ -1,0 +1,82 @@
+import re
+import uuid
+from azure.identity import DefaultAzureCredential
+import requests
+import functools
+import inspect
+import textwrap
+
+
+# def get_dummy_remote_source():
+#     def remote(_func=None, *, subscription_id, resource_group, sessions_api_base_url, session_pool, session_id=None):
+#         def decorator_remote(func):
+#             import functools
+#             @functools.wraps(func)
+#             def wrapper(*args, **kwargs):
+#                 result = func(*args, **kwargs)
+#                 return result
+#             return wrapper
+#         return decorator_remote
+    
+#     return textwrap.dedent(inspect.getsource(remote))
+
+
+def strip_decorators(func_source):
+    func_source = textwrap.dedent(func_source)
+    lines = func_source.split("\n")
+    # remove every line until the function definition
+    while lines and not lines[0].startswith("def "):
+        lines.pop(0)
+
+    return "\n".join(lines)
+
+
+def convert_to_arg(variable):
+    # doesn't support all types
+    if isinstance(variable, str):
+        # this fails if string has newlines
+        escaped = variable.replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{escaped}"'
+    return str(variable)
+
+
+def remote(_func=None, *, subscription_id, resource_group, sessions_api_base_url, session_pool, session_id=None):
+    def decorator_remote(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            nonlocal session_id
+            
+            credential = DefaultAzureCredential()
+            access_token = credential.get_token("https://acasessions.io/.default").token
+            session_id = str(uuid.uuid4()) if session_id is None else session_id
+
+            print(f"\nRunning command in session ID: {session_id}")
+            api_url = f"{sessions_api_base_url}subscriptions/{subscription_id}/resourceGroups/{resource_group}/sessionPools/{session_pool}/python/execute"
+            print(f"API URL: {api_url}")
+            headers = {
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+            }
+
+            func_source = strip_decorators(inspect.getsource(func))
+            func_name = func.__name__
+
+            command = f"{func_source}\n\n\n{func_name}({', '.join([convert_to_arg(arg) for arg in args])})"
+            print(f"Command: {command}")
+            body = {
+                "properties": {
+                    "identifier": session_id,
+                    "codeInputType": "inline",
+                    "executionType": "synchronous",
+                    "pythonCode": command,
+                }
+            }
+
+            response = requests.post(api_url, headers=headers, json=body)
+            response.raise_for_status()
+            response_json = response.json()
+            result = response_json
+            print(f"Result: {result}")
+            return result['result']
+        return wrapper
+    return decorator_remote
